@@ -166,22 +166,54 @@ async def menu_callback(update, context: ContextTypes.DEFAULT_TYPE):
 # ------------------------------------------------------------------
 # UTIL: UPLOAD & DOWNLOAD GAMBAR
 # ------------------------------------------------------------------
-def upload_to_catbox(file_path: str) -> str | None:
-    """Upload gambar ke catbox.moe secara anonim buat dapet URL publik."""
-    url = "https://catbox.moe/user/api.php"
+def _upload_to_0x0(file_path: str) -> str | None:
+    """Upload ke 0x0.st (anonim, tanpa API key)."""
+    try:
+        headers = {"User-Agent": "TelegramFaceBot/1.0"}
+        with open(file_path, "rb") as f:
+            resp = requests.post(
+                "https://0x0.st",
+                files={"file": f},
+                headers=headers,
+                timeout=30,
+            )
+        if resp.status_code == 200 and resp.text.strip().startswith("http"):
+            return resp.text.strip()
+        logger.warning(f"Upload 0x0.st gagal, response: {resp.text!r}")
+    except Exception as e:
+        logger.error(f"Upload 0x0.st error: {e}")
+    return None
+
+
+def _upload_to_catbox(file_path: str) -> str | None:
+    """Upload ke catbox.moe (anonim, tanpa API key)."""
     try:
         with open(file_path, "rb") as f:
             resp = requests.post(
-                url,
+                "https://catbox.moe/user/api.php",
                 data={"reqtype": "fileupload"},
                 files={"fileToUpload": f},
                 timeout=30,
             )
-        if resp.status_code == 200 and resp.text.startswith("http"):
+        if resp.status_code == 200 and resp.text.strip().startswith("http"):
             return resp.text.strip()
-        logger.warning(f"Upload catbox gagal, response: {resp.text}")
+        logger.warning(f"Upload catbox gagal, response: {resp.text!r}")
     except Exception as e:
         logger.error(f"Upload catbox error: {e}")
+    return None
+
+
+def upload_to_public_host(file_path: str) -> str | None:
+    """
+    Coba beberapa image host publik secara berurutan (fallback chain),
+    supaya kalau satu host lagi down/bermasalah, bot tetap bisa jalan
+    pakai host lain tanpa perlu ubah kode.
+    """
+    providers = [_upload_to_0x0, _upload_to_catbox]
+    for provider in providers:
+        result = provider(file_path)
+        if result:
+            return result
     return None
 
 
@@ -288,7 +320,7 @@ async def process_image_for_mode(update, context, local_path: str):
 
     if mode in ("mode_reverse", "mode_brand"):
         await update.message.reply_text("Lagi upload gambar buat dapet link publik...")
-        image_url = upload_to_catbox(local_path)
+        image_url = upload_to_public_host(local_path)
         if not image_url:
             await update.message.reply_text("Gagal upload gambar ke host publik, coba lagi beberapa saat.")
             audit_log(user.id, user.username, mode, "upload_failed")
