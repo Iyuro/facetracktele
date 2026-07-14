@@ -203,13 +203,56 @@ def _upload_to_catbox(file_path: str) -> str | None:
     return None
 
 
+def _upload_to_uguu(file_path: str) -> str | None:
+    """Upload ke uguu.se (anonim, tanpa API key, file disimpan sementara ~48 jam)."""
+    try:
+        with open(file_path, "rb") as f:
+            resp = requests.post(
+                "https://uguu.se/upload.php",
+                files={"files[]": f},
+                timeout=30,
+            )
+        data = resp.json()
+        if data.get("success") and data.get("files"):
+            return data["files"][0]["url"]
+        logger.warning(f"Upload uguu.se gagal, response: {resp.text!r}")
+    except Exception as e:
+        logger.error(f"Upload uguu.se error: {e}")
+    return None
+
+
+def _upload_to_tmpfiles(file_path: str) -> str | None:
+    """Upload ke tmpfiles.org (anonim, tanpa API key, file disimpan sementara ~1 jam)."""
+    try:
+        with open(file_path, "rb") as f:
+            resp = requests.post(
+                "https://tmpfiles.org/api/v1/upload",
+                files={"file": f},
+                timeout=30,
+            )
+        data = resp.json()
+        url = data.get("data", {}).get("url")
+        if url:
+            # Endpoint biasa nampilin halaman preview, butuh "/dl/" biar jadi direct link
+            return url.replace("tmpfiles.org/", "tmpfiles.org/dl/", 1)
+        logger.warning(f"Upload tmpfiles.org gagal, response: {resp.text!r}")
+    except Exception as e:
+        logger.error(f"Upload tmpfiles.org error: {e}")
+    return None
+
+
 def upload_to_public_host(file_path: str) -> str | None:
     """
     Coba beberapa image host publik secara berurutan (fallback chain),
     supaya kalau satu host lagi down/bermasalah, bot tetap bisa jalan
     pakai host lain tanpa perlu ubah kode.
+
+    Urutan: 0x0.st -> catbox.moe -> uguu.se -> tmpfiles.org
+    (dua yang terakhir ditambahin karena 0x0.st & catbox.moe sempat
+    nolak semua upload gara-gara masalah di sisi mereka sendiri, bukan
+    error di bot ini).
     """
-    providers = [_upload_to_0x0, _upload_to_catbox]
+    providers = [_upload_to_0x0, _upload_to_catbox, _upload_to_uguu, _upload_to_tmpfiles]
     for provider in providers:
         result = provider(file_path)
         if result:
@@ -473,7 +516,10 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     logger.info("Bot jalan, polling...")
-    app.run_polling()
+    # drop_pending_updates=True: pas Railway redeploy dan sempat ada 2 instance
+    # numpuk sebentar (yang lama belum mati pas yang baru udah nyala), instance
+    # baru nggak bakal "kebanjiran" update lama yang udah basi.
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
