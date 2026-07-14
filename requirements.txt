@@ -3,9 +3,18 @@ requests>=2.31.0
 Pillow>=10.0.0
 numpy>=1.24.0
 
-# Fitur compare wajah KYC (opsional, tapi wajib buat mode_kyc berfungsi penuh)
-# NOTE: face_recognition butuh dlib, yang butuh CMake + compiler C++ terinstall
-# di sistem sebelum "pip install" bisa jalan. Lihat README.md untuk instruksi
-# instalasi per OS.
-face_recognition>=1.3.0
-dlib>=19.24.0
+# --------------------------------------------------------------------
+# face_recognition & dlib DINONAKTIFKAN dari sini supaya build/deploy
+# nggak gagal (dlib butuh compile C++ yang berat & sering gagal di
+# platform PaaS kayak Railway).
+#
+# Bot tetap jalan normal tanpa ini — cuma fitur "compare wajah" di mode
+# KYC yang nanti kasih pesan "library belum terinstall" ke user.
+#
+# Kalau nanti mau ngaktifin fitur compare wajah:
+# 1. Install cmake + build-essential (Linux) atau setara di OS kamu
+# 2. Uncomment 2 baris di bawah ini
+# 3. pip install -r requirements.txt ulang
+#
+# face_recognition>=1.3.0
+# dlib>=19.24.0

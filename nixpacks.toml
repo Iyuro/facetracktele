@@ -1,9 +1,6 @@
-# Supaya dlib (dependency face_recognition) bisa di-compile saat build di Railway
-[phases.setup]
-nixPkgs = ["cmake", "gcc", "pkg-config"]
-
-[phases.install]
-cmds = ["pip install -r requirements.txt"]
+# dlib/face_recognition dinonaktifkan dari requirements.txt, jadi build
+# nggak butuh cmake/gcc lagi. File ini dibiarkan minimal — nixpacks
+# otomatis detect Python project dan install dari requirements.txt.
 
 [start]
 cmd = "python bot.py"

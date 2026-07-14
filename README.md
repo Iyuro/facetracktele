@@ -10,8 +10,12 @@ atau **link gambar** (http/https).
 3. **Verifikasi Foto (KYC)** — mode consent-based, 2 tahap:
    - Tahap 1: kirim foto referensi (misal foto KTP/ID)
    - Tahap 2: kirim foto selfie
-   - Bot otomatis membandingkan kemiripan wajah pakai `face_recognition` dan kasih skor
-     jarak (distance) + verdict cocok/tidak.
+   - Kalau library `face_recognition` terinstall, bot otomatis membandingkan kemiripan
+     wajah dan kasih skor jarak (distance) + verdict cocok/tidak. **Secara default,
+     library ini TIDAK diinstall** (lihat bagian "Fitur compare wajah (opsional)" di
+     bawah) supaya deploy/build nggak gagal karena `dlib` berat di-compile. Tanpa
+     library ini, foto tetap tersimpan di `kyc_data/` tapi belum ada perbandingan
+     otomatis — bot kasih pesan "library belum terinstall".
 4. **Deteksi Indikasi Editan/Deepfake** — pakai Error Level Analysis (ELA) buat ngasih
    skor kasar apakah gambar kemungkinan sudah diedit. Ini **bukan** detektor deepfake
    yang akurat, cuma indikator awal.
@@ -37,6 +41,25 @@ python bot.py
 > di sistem SEBELUM di-pip-install. Ubuntu/Debian: `sudo apt install cmake build-essential`.
 > macOS: `brew install cmake`. Kalau males ribet, hapus dua baris `face_recognition`/`dlib`
 > dari `requirements.txt` — bot tetap jalan, cuma mode compare wajah KYC kasih pesan error.
+
+## Fitur compare wajah (opsional)
+
+Secara default, `requirements.txt` **tidak** menginstall `face_recognition`/`dlib`
+supaya proses build/deploy nggak gagal (dlib butuh compile C++ yang berat & sering
+bermasalah di platform PaaS kayak Railway). Tanpa ini, 3 mode lain (reverse search,
+brand monitoring, deepfake check) tetap jalan normal — cuma compare wajah otomatis
+di mode KYC yang belum aktif.
+
+**Kalau mau ngaktifin fitur compare wajah**, pilihan yang paling aman:
+
+- **Jalan di komputer/server sendiri (bukan Railway)**: install dulu build tools
+  (`sudo apt install cmake build-essential` di Ubuntu/Debian, atau `brew install cmake`
+  di macOS), lalu uncomment 2 baris `face_recognition` & `dlib` di `requirements.txt`,
+  lalu `pip install -r requirements.txt` ulang.
+- **Tetap mau di Railway**: perlu Dockerfile custom yang install `cmake`, `build-essential`,
+  dan `libopenblas-dev` sebelum `pip install`, karena compile dlib butuh waktu %
+  resource yang kadang di luar limit default nixpacks build. Kabarin kalau mau gue
+  siapin Dockerfile-nya.
 
 ## Deploy ke Railway (auto-run, tinggal push GitHub)
 
