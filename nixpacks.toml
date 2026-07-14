@@ -1,0 +1,9 @@
+# Supaya dlib (dependency face_recognition) bisa di-compile saat build di Railway
+[phases.setup]
+nixPkgs = ["cmake", "gcc", "pkg-config"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "python bot.py"
