@@ -112,6 +112,10 @@ MENU = [
     [InlineKeyboardButton("🪪 Verifikasi Foto (KYC)", callback_data="mode_kyc")],
     [InlineKeyboardButton("🕵️ Deteksi Indikasi Editan/Deepfake", callback_data="mode_deepfake")],
     [InlineKeyboardButton("🧾 Detail Foto (EXIF/Metadata Lengkap)", callback_data="mode_metadata")],
+    [InlineKeyboardButton("🔤 OCR — Baca Teks di Foto", callback_data="mode_ocr")],
+    [InlineKeyboardButton("🕵️‍♂️ Deteksi Steganografi", callback_data="mode_stego")],
+    [InlineKeyboardButton("🎨 Analisis Warna & Kualitas Gambar", callback_data="mode_visual")],
+    [InlineKeyboardButton("🔁 Cek Foto Pernah Dikirim? (non-permanen)", callback_data="mode_duplicate")],
 ]
 
 WELCOME_TEXT = (
@@ -122,7 +126,12 @@ WELCOME_TEXT = (
     "3️⃣ Verifikasi Foto (KYC) — kirim foto referensi + selfie sendiri, dibandingkan otomatis\n"
     "4️⃣ Deteksi Indikasi Editan/Deepfake — analisa kasar (ELA), bukan detektor akurat\n"
     "5️⃣ Detail Foto (EXIF/Metadata) — data kamera/HP, GPS (kalau ada), hash file, "
-    "indikasi editan & indikasi AI-generated\n\n"
+    "indikasi editan & indikasi AI-generated\n"
+    "6️⃣ OCR — baca teks yang ada di dalam foto\n"
+    "7️⃣ Deteksi Steganografi — cek ada data/file tersembunyi yang \"ditempel\" di gambar\n"
+    "8️⃣ Analisis Warna & Kualitas — dominant color, brightness/contrast, blur score, estimasi kualitas JPEG\n"
+    "9️⃣ Cek Foto Pernah Dikirim? — cocokin hash ke foto yang pernah masuk bot ini "
+    "(data di-reset tiap bot restart, TIDAK disimpan permanen)\n\n"
     "Kamu bisa kirim FOTO langsung, kirim sebagai FILE/DOKUMEN, atau LINK gambar (http/https).\n"
     "Pilih menu di bawah dulu ya."
 )
@@ -156,6 +165,30 @@ MODE_PROMPTS = {
         "kompres & MENGHAPUS EXIF-nya duluan. Buat metadata original yang utuh, "
         "kirim gambarnya sebagai *File/Dokumen* (klik 📎 → File, bukan galeri foto "
         "biasa), atau kirim link langsung ke gambarnya."
+    ),
+    "mode_ocr": (
+        "Mode *OCR - Baca Teks di Foto* aktif.\n"
+        "Kirim foto atau link gambar yang ada tulisannya (dokumen, plat nomor, "
+        "papan nama, screenshot, dll), nanti teksnya diekstrak otomatis."
+    ),
+    "mode_stego": (
+        "Mode *Deteksi Steganografi* aktif.\n"
+        "Kirim foto (lebih akurat kalau dikirim sebagai *File/Dokumen*, bukan Photo "
+        "terkompresi) atau link gambar. Bot bakal cek apakah ada data/file yang "
+        "\"ditempel\" tersembunyi di file gambar itu."
+    ),
+    "mode_visual": (
+        "Mode *Analisis Warna & Kualitas Gambar* aktif.\n"
+        "Kirim foto atau link gambar. Bot bakal kasih dominant color, brightness/"
+        "contrast, skor blur/ketajaman, dan estimasi kualitas kompresi JPEG."
+    ),
+    "mode_duplicate": (
+        "Mode *Cek Foto Pernah Dikirim?* aktif.\n"
+        "Kirim foto atau link gambar. Bot bakal cek hash-nya ke daftar foto yang "
+        "pernah masuk ke bot ini.\n\n"
+        "⚠️ Catatan: daftar ini CUMA disimpan di memory selama bot nyala — "
+        "otomatis kosong lagi tiap kali bot di-restart/redeploy. Nggak ada "
+        "penyimpanan permanen ke disk/database."
     ),
 }
 
@@ -664,6 +697,266 @@ def format_metadata_report(result: dict) -> list[str]:
 
 
 # ------------------------------------------------------------------
+# FITUR TAMBAHAN 1: OCR (BACA TEKS DI FOTO)
+# ------------------------------------------------------------------
+try:
+    import pytesseract
+    PYTESSERACT_AVAILABLE = True
+except ImportError:
+    PYTESSERACT_AVAILABLE = False
+
+
+def run_ocr(image_path: str) -> dict:
+    if not PYTESSERACT_AVAILABLE:
+        return {"error": "Library pytesseract belum terinstall di server."}
+    try:
+        image = Image.open(image_path)
+        try:
+            text = pytesseract.image_to_string(image, lang="ind+eng")
+        except pytesseract.TesseractError:
+            # fallback kalau language pack "ind" belum ke-install di server
+            text = pytesseract.image_to_string(image, lang="eng")
+        return {"text": text.strip()}
+    except Exception as e:
+        logger.error(f"OCR gagal: {e}")
+        return {"error": f"Gagal OCR: {e}"}
+
+
+# ------------------------------------------------------------------
+# FITUR TAMBAHAN 2: DETEKSI STEGANOGRAFI
+# ------------------------------------------------------------------
+TRAILING_DATA_SIGNATURES = {
+    b"PK\x03\x04": "ZIP archive",
+    b"Rar!\x1a\x07": "RAR archive",
+    b"%PDF": "PDF document",
+    b"\x1f\x8b": "GZIP archive",
+    b"7z\xbc\xaf\x27\x1c": "7-Zip archive",
+    b"GIF89a": "GIF image",
+    b"GIF87a": "GIF image",
+    b"\x89PNG\r\n\x1a\n": "PNG image",
+    b"\xff\xd8\xff": "JPEG image",
+}
+
+
+def detect_trailing_data(file_path: str) -> dict:
+    """
+    Cek ada data nyelip SETELAH marker akhir file (JPEG EOI / PNG IEND).
+    Ini teknik steganografi paling umum buat 'nempelin' file lain (zip,
+    dokumen, dll) di belakang byte terakhir gambar — gambar tetep kebuka
+    normal di viewer manapun, tapi ada file lain nebeng di baliknya.
+    """
+    with open(file_path, "rb") as f:
+        data = f.read()
+
+    trailing = None
+    if data[:2] == b"\xff\xd8":  # JPEG
+        eoi = data.rfind(b"\xff\xd9")
+        if eoi != -1 and eoi + 2 < len(data):
+            trailing = data[eoi + 2:]
+    elif data[:8] == b"\x89PNG\r\n\x1a\n":  # PNG
+        iend = data.rfind(b"IEND")
+        if iend != -1 and iend + 8 < len(data):  # IEND chunk + 4 byte CRC
+            trailing = data[iend + 8:]
+
+    if not trailing or len(trailing) < 4:
+        return {"found": False}
+
+    matched_type = next(
+        (label for sig, label in TRAILING_DATA_SIGNATURES.items() if trailing.startswith(sig)),
+        None,
+    )
+    return {
+        "found": True,
+        "size": len(trailing),
+        "type_guess": matched_type or "tidak dikenali (data mentah/terenkripsi?)",
+    }
+
+
+def lsb_chi_square_heuristic(image_path: str) -> dict:
+    """
+    Heuristik chi-square sederhana buat curiga LSB steganography (pasangan
+    nilai piksel (2i, 2i+1) yang kelewat 'rata' khas hasil LSB replacement).
+    HEURISTIK LEMAH — kompresi/editan berat juga bisa kasih hasil serupa.
+    """
+    try:
+        img = Image.open(image_path).convert("L")
+        arr = np.asarray(img).flatten()
+        hist = np.bincount(arr, minlength=256).astype(float)
+
+        chi_sq = 0.0
+        pairs = 0
+        for i in range(0, 256, 2):
+            observed_even, observed_odd = hist[i], hist[i + 1]
+            expected = (observed_even + observed_odd) / 2
+            if expected > 0:
+                chi_sq += ((observed_even - expected) ** 2) / expected
+                chi_sq += ((observed_odd - expected) ** 2) / expected
+                pairs += 1
+
+        avg_chi = chi_sq / pairs if pairs else 0
+        return {"avg_chi_square": round(avg_chi, 3), "suspicious": avg_chi < 1.5}
+    except Exception as e:
+        logger.warning(f"LSB heuristic gagal: {e}")
+        return {"avg_chi_square": None, "suspicious": False}
+
+
+def analyze_steganography(image_path: str) -> dict:
+    return {
+        "trailing": detect_trailing_data(image_path),
+        "lsb": lsb_chi_square_heuristic(image_path),
+    }
+
+
+def format_stego_report(result: dict) -> str:
+    trailing, lsb = result["trailing"], result["lsb"]
+    lines = ["🕵️‍♂️ *DETEKSI STEGANOGRAFI*\n"]
+
+    if trailing["found"]:
+        lines.append(
+            "🔴 KETEMU data nyelip setelah akhir file gambar!\n"
+            f"Ukuran data tambahan: {human_readable_size(trailing['size'])}\n"
+            f"Kemungkinan tipe: {trailing['type_guess']}\n"
+            "Ini indikasi KUAT ada file/data yang sengaja ditempel di balik gambar ini."
+        )
+    else:
+        lines.append("🟢 Nggak ada data mencurigakan yang nyelip setelah akhir file gambar.")
+
+    if lsb["avg_chi_square"] is not None:
+        lines.append("")
+        verdict = (
+            "🟡 Pola bit terakhir piksel (LSB) kelihatan mencurigakan, ada "
+            "kemungkinan LSB steganography." if lsb["suspicious"] else
+            "🟢 Pola bit terakhir piksel (LSB) masih wajar seperti foto normal."
+        )
+        lines.append(f"{verdict}\n(skor chi-square: {lsb['avg_chi_square']})")
+
+    lines.append(
+        "\n⚠️ Cek 'data nyelip setelah EOF' cukup reliable, tapi cek LSB gampang "
+        "false positive/negative — bukan pengganti tools forensik khusus "
+        "(StegExpose, zsteg, binwalk, dll)."
+    )
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
+# FITUR TAMBAHAN 3: ANALISIS WARNA & KUALITAS GAMBAR
+# ------------------------------------------------------------------
+def analyze_visual_quality(image_path: str) -> dict:
+    image = Image.open(image_path).convert("RGB")
+    thumb = image.copy()
+    thumb.thumbnail((400, 400))
+
+    # Dominant colors
+    quantized = thumb.quantize(colors=5, method=Image.MEDIANCUT)
+    palette = quantized.getpalette()
+    color_counts = sorted(quantized.getcolors(), reverse=True)
+    total_px = sum(c for c, _ in color_counts)
+    dominant_colors = []
+    for count, idx in color_counts[:5]:
+        r, g, b = palette[idx * 3: idx * 3 + 3]
+        dominant_colors.append({"hex": f"#{r:02x}{g:02x}{b:02x}", "pct": round(count / total_px * 100, 1)})
+
+    # Brightness & contrast
+    gray = np.asarray(thumb.convert("L")).astype("float32")
+    brightness, contrast = float(gray.mean()), float(gray.std())
+
+    # Blur/sharpness (variance of Laplacian, konvolusi manual pakai numpy)
+    padded = np.pad(gray, 1, mode="edge")
+    laplacian = (
+        padded[0:-2, 1:-1] + padded[1:-1, 0:-2] + padded[1:-1, 2:] + padded[2:, 1:-1]
+        - 4 * padded[1:-1, 1:-1]
+    )
+    sharpness = float(laplacian.var())
+    if sharpness < 50:
+        blur_verdict = "Kelihatan blur/kurang fokus."
+    elif sharpness < 150:
+        blur_verdict = "Ketajaman sedang."
+    else:
+        blur_verdict = "Gambar tajam/fokus bagus."
+
+    # Estimasi kualitas JPEG dari quantization table (kasar)
+    quality_estimate = None
+    try:
+        orig = Image.open(image_path)
+        luma_table = getattr(orig, "quantization", {}).get(0) if hasattr(orig, "quantization") else None
+        if luma_table:
+            avg_q = sum(luma_table) / len(luma_table)
+            quality_estimate = max(1, min(100, round(100 - avg_q)))
+    except Exception:
+        pass
+
+    return {
+        "dominant_colors": dominant_colors,
+        "brightness": round(brightness, 1),
+        "contrast": round(contrast, 1),
+        "sharpness": round(sharpness, 1),
+        "blur_verdict": blur_verdict,
+        "quality_estimate": quality_estimate,
+    }
+
+
+def format_visual_report(result: dict) -> str:
+    lines = ["🎨 *ANALISIS WARNA & KUALITAS GAMBAR*\n", "*Dominant colors:*"]
+    for c in result["dominant_colors"]:
+        lines.append(f"`{c['hex']}` — {c['pct']}%")
+    lines += [
+        "",
+        f"Brightness rata-rata: {result['brightness']} / 255",
+        f"Contrast (std dev): {result['contrast']}",
+        f"Skor ketajaman (Laplacian variance): {result['sharpness']}",
+        result["blur_verdict"],
+    ]
+    if result["quality_estimate"] is not None:
+        lines.append(f"\nEstimasi kualitas kompresi JPEG: ~{result['quality_estimate']}/100 (kasar)")
+    else:
+        lines.append("\nEstimasi kualitas JPEG: nggak bisa dihitung (bukan JPEG / quant table nggak ada).")
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
+# FITUR TAMBAHAN 4: CEK FOTO PERNAH DIKIRIM? (in-memory, NON-PERMANEN)
+# ------------------------------------------------------------------
+# Sengaja cuma disimpan di RAM (dict biasa), BUKAN file/database — sesuai
+# keputusan: nggak ada penyimpanan permanen. Otomatis kosong lagi tiap
+# kali proses bot restart/redeploy, dan cuma nyimpen hash + waktu, bukan
+# identitas user pengirim.
+_seen_photo_hashes: dict = {}
+
+
+def check_duplicate(sha256_hash: str) -> dict:
+    existing = _seen_photo_hashes.get(sha256_hash)
+    if existing:
+        existing["count"] += 1
+        return {"is_duplicate": True, "first_seen": existing["first_seen"], "count": existing["count"]}
+    _seen_photo_hashes[sha256_hash] = {
+        "first_seen": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "count": 1,
+    }
+    return {"is_duplicate": False, "first_seen": None, "count": 1}
+
+
+def format_duplicate_report(sha256_hash: str, result: dict) -> str:
+    lines = ["🔁 *CEK FOTO PERNAH DIKIRIM?*\n", f"SHA256: `{sha256_hash}`\n"]
+    if result["is_duplicate"]:
+        lines.append(
+            "🔴 Foto ini (hash identik) SUDAH PERNAH dikirim ke bot ini sebelumnya.\n"
+            f"Pertama kali terlihat: {result['first_seen']}\n"
+            f"Total sudah dikirim: {result['count']}x (termasuk yang sekarang)."
+        )
+    else:
+        lines.append(
+            "🟢 Belum pernah ada foto dengan hash identik yang masuk ke bot ini "
+            "(sejak terakhir restart)."
+        )
+    lines.append(
+        "\n⚠️ Daftar ini cuma di memory (RAM), nggak disimpan ke disk/database, "
+        "dan reset otomatis tiap kali bot restart/redeploy. Nggak nyimpen "
+        "identitas user pengirim — cuma hash + waktu pertama kali muncul."
+    )
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
 # KYC FACE COMPARE
 # ------------------------------------------------------------------
 def compare_faces(ref_path: str, selfie_path: str, tolerance: float = FACE_MATCH_TOLERANCE) -> dict:
@@ -783,6 +1076,40 @@ async def process_image_for_mode(update, context, local_path: str):
             logger.error(f"Gagal analisa metadata: {e}")
             await update.message.reply_text(f"⚠️ Gagal analisa metadata: {e}")
             audit_log(user.id, user.username, "metadata_check_error", str(e))
+
+    elif mode == "mode_ocr":
+        await update.message.reply_text("Lagi baca teks di gambar (OCR)...")
+        result = run_ocr(local_path)
+        if "error" in result:
+            await update.message.reply_text(f"⚠️ {result['error']}")
+        elif not result["text"]:
+            await update.message.reply_text("🔤 Nggak ketemu teks yang kebaca di gambar ini.")
+        else:
+            text = result["text"]
+            if len(text) > 3800:
+                text = text[:3800] + "\n...(dipotong, teksnya kepanjangan)"
+            await update.message.reply_text("🔤 Teks yang kebaca:")
+            await update.message.reply_text(text)
+        audit_log(user.id, user.username, "ocr", "done")
+
+    elif mode == "mode_stego":
+        await update.message.reply_text("Lagi cek indikasi steganografi...")
+        result = analyze_steganography(local_path)
+        await update.message.reply_text(format_stego_report(result), parse_mode="Markdown")
+        audit_log(user.id, user.username, "stego_check", f"trailing_found={result['trailing']['found']}")
+
+    elif mode == "mode_visual":
+        await update.message.reply_text("Lagi analisa warna & kualitas gambar...")
+        result = analyze_visual_quality(local_path)
+        await update.message.reply_text(format_visual_report(result), parse_mode="Markdown")
+        audit_log(user.id, user.username, "visual_analysis", "done")
+
+    elif mode == "mode_duplicate":
+        await update.message.reply_text("Lagi cek hash ke daftar foto yang pernah masuk...")
+        hashes = compute_hashes(local_path)
+        result = check_duplicate(hashes["sha256"])
+        await update.message.reply_text(format_duplicate_report(hashes["sha256"], result), parse_mode="Markdown")
+        audit_log(user.id, user.username, "duplicate_check", f"is_dup={result['is_duplicate']}")
 
     if os.path.exists(local_path):
         os.remove(local_path)

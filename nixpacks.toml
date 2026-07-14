@@ -1,6 +1,12 @@
 # dlib/face_recognition dinonaktifkan dari requirements.txt, jadi build
 # nggak butuh cmake/gcc lagi. File ini dibiarkan minimal — nixpacks
 # otomatis detect Python project dan install dari requirements.txt.
+#
+# tesseract-ocr ditambahin di sini karena itu binary system-level (bukan
+# pip package) yang dibutuhin fitur OCR (pytesseract cuma wrapper-nya).
+
+[phases.setup]
+nixPkgs = ["tesseract"]
 
 [start]
 cmd = "python bot.py"
