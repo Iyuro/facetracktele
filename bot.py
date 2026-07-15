@@ -116,6 +116,7 @@ MENU = [
     [InlineKeyboardButton("🕵️‍♂️ Deteksi Steganografi", callback_data="mode_stego")],
     [InlineKeyboardButton("🎨 Analisis Warna & Kualitas Gambar", callback_data="mode_visual")],
     [InlineKeyboardButton("🔁 Cek Foto Pernah Dikirim? (non-permanen)", callback_data="mode_duplicate")],
+    [InlineKeyboardButton("🚗 Cek Pajak Kendaraan (link resmi)", callback_data="mode_pajak")],
 ]
 
 WELCOME_TEXT = (
@@ -131,7 +132,10 @@ WELCOME_TEXT = (
     "7️⃣ Deteksi Steganografi — cek ada data/file tersembunyi yang \"ditempel\" di gambar\n"
     "8️⃣ Analisis Warna & Kualitas — dominant color, brightness/contrast, blur score, estimasi kualitas JPEG\n"
     "9️⃣ Cek Foto Pernah Dikirim? — cocokin hash ke foto yang pernah masuk bot ini "
-    "(data di-reset tiap bot restart, TIDAK disimpan permanen)\n\n"
+    "(data di-reset tiap bot restart, TIDAK disimpan permanen)\n"
+    "🔟 Cek Pajak Kendaraan — OCR plat nomor, terus kasih LINK RESMI (app SIGNAL "
+    "& e-Samsat provinsi) buat cek pajak kendaraan MILIK SENDIRI. Bot ini nggak "
+    "nampilin data pemilik siapapun, cuma nunjukin ke mana harus cek.\n\n"
     "Kamu bisa kirim FOTO langsung, kirim sebagai FILE/DOKUMEN, atau LINK gambar (http/https).\n"
     "Pilih menu di bawah dulu ya."
 )
@@ -189,6 +193,16 @@ MODE_PROMPTS = {
         "⚠️ Catatan: daftar ini CUMA disimpan di memory selama bot nyala — "
         "otomatis kosong lagi tiap kali bot di-restart/redeploy. Nggak ada "
         "penyimpanan permanen ke disk/database."
+    ),
+    "mode_pajak": (
+        "Mode *Cek Pajak Kendaraan* aktif.\n"
+        "Kirim foto plat nomor kendaraan kamu sendiri (atau link gambar). Bot "
+        "bakal OCR platnya, tebak provinsi asal registrasinya dari kode wilayah, "
+        "terus kasih LINK RESMI (app SIGNAL & website e-Samsat provinsi terkait) "
+        "buat kamu cek/bayar pajaknya sendiri.\n\n"
+        "⚠️ Bot ini TIDAK mengakses database Samsat/Polri dan TIDAK menampilkan "
+        "data pemilik, alamat, atau data pribadi apapun — cuma nunjukin ke mana "
+        "kamu harus cek, sesuai channel resmi."
     ),
 }
 
@@ -957,6 +971,128 @@ def format_duplicate_report(sha256_hash: str, result: dict) -> str:
 
 
 # ------------------------------------------------------------------
+# FITUR TAMBAHAN 5: CEK PAJAK KENDARAAN (LINK RESMI, BUKAN DATA PRIBADI)
+# ------------------------------------------------------------------
+# Cuma mapping kode-wilayah -> provinsi (info publik dari Korlantas Polri),
+# BUKAN lookup data pemilik. Best-effort & belum tentu 100% lengkap/terbaru
+# (ada pemekaran daerah baru) — makanya selalu dikasih disclaimer + fallback
+# link pencarian resmi.
+PLATE_CODE_TO_PROVINCE = {
+    "BL": "Aceh", "BB": "Sumatera Utara", "BK": "Sumatera Utara",
+    "BA": "Sumatera Barat", "BM": "Riau", "BP": "Kepulauan Riau",
+    "BH": "Jambi", "BG": "Sumatera Selatan", "BN": "Kepulauan Bangka Belitung",
+    "BD": "Bengkulu", "BE": "Lampung",
+    "A": "Banten", "B": "DKI Jakarta (Jabodetabek)",
+    "D": "Jawa Barat (Bandung Raya)", "E": "Jawa Barat (Cirebon Raya)",
+    "F": "Jawa Barat (Bogor Raya)", "T": "Jawa Barat (Purwasuka)",
+    "Z": "Jawa Barat (Priangan Timur)",
+    "G": "Jawa Tengah (Pekalongan)", "H": "Jawa Tengah (Semarang)",
+    "K": "Jawa Tengah (Pati)", "R": "Jawa Tengah (Banyumas)",
+    "AA": "Jawa Tengah (Kedu/Magelang)", "AD": "Jawa Tengah (Surakarta/Solo)",
+    "AB": "DI Yogyakarta",
+    "L": "Jawa Timur (Surabaya)", "M": "Jawa Timur (Madura)",
+    "N": "Jawa Timur (Malang)", "P": "Jawa Timur (Besuki/Banyuwangi)",
+    "S": "Jawa Timur (Bojonegoro/Mojokerto)", "AE": "Jawa Timur (Madiun)",
+    "W": "Jawa Timur (Sidoarjo/Gresik)", "AG": "Jawa Timur (Kediri/Blitar)",
+    "DK": "Bali", "DR": "Nusa Tenggara Barat", "EA": "Nusa Tenggara Barat",
+    "DH": "Nusa Tenggara Timur", "EB": "Nusa Tenggara Timur", "ED": "Nusa Tenggara Timur",
+    "KB": "Kalimantan Barat", "KH": "Kalimantan Tengah", "DA": "Kalimantan Selatan",
+    "KT": "Kalimantan Timur", "KU": "Kalimantan Utara",
+    "DB": "Sulawesi Utara", "DL": "Sulawesi Utara", "DN": "Gorontalo",
+    "DT": "Sulawesi Tengah", "DC": "Sulawesi Barat", "DD": "Sulawesi Selatan",
+    "DP": "Sulawesi Tenggara", "DE": "Maluku", "DG": "Maluku Utara",
+    "PA": "Papua", "PB": "Papua Barat",
+}
+
+# Link e-Samsat provinsi yang datanya udah dicek silang dari beberapa sumber.
+# Domain instansi daerah ini kadang berubah — kalau link mati, pakai fallback
+# pencarian Google atau app SIGNAL.
+PROVINCE_ESAMSAT_LINKS = {
+    "DKI Jakarta (Jabodetabek)": "https://samsat-pkb.jakarta.go.id",
+    "Jawa Barat (Bandung Raya)": "https://bapenda.jabarprov.go.id/infopkb",
+    "Jawa Barat (Cirebon Raya)": "https://bapenda.jabarprov.go.id/infopkb",
+    "Jawa Barat (Bogor Raya)": "https://bapenda.jabarprov.go.id/infopkb",
+    "Jawa Barat (Purwasuka)": "https://bapenda.jabarprov.go.id/infopkb",
+    "Jawa Barat (Priangan Timur)": "https://bapenda.jabarprov.go.id/infopkb",
+    "Jawa Tengah (Pekalongan)": "https://bppd.jatengprov.go.id/info-pajak-kendaraan/",
+    "Jawa Tengah (Semarang)": "https://bppd.jatengprov.go.id/info-pajak-kendaraan/",
+    "Jawa Tengah (Pati)": "https://bppd.jatengprov.go.id/info-pajak-kendaraan/",
+    "Jawa Tengah (Banyumas)": "https://bppd.jatengprov.go.id/info-pajak-kendaraan/",
+    "Jawa Tengah (Kedu/Magelang)": "https://bppd.jatengprov.go.id/info-pajak-kendaraan/",
+    "Jawa Tengah (Surakarta/Solo)": "https://bppd.jatengprov.go.id/info-pajak-kendaraan/",
+    "Jawa Timur (Surabaya)": "https://www.esamsat.jatimprov.go.id",
+    "Jawa Timur (Madura)": "https://www.esamsat.jatimprov.go.id",
+    "Jawa Timur (Malang)": "https://www.esamsat.jatimprov.go.id",
+    "Jawa Timur (Besuki/Banyuwangi)": "https://www.esamsat.jatimprov.go.id",
+    "Jawa Timur (Bojonegoro/Mojokerto)": "https://www.esamsat.jatimprov.go.id",
+    "Jawa Timur (Madiun)": "https://www.esamsat.jatimprov.go.id",
+    "Jawa Timur (Sidoarjo/Gresik)": "https://www.esamsat.jatimprov.go.id",
+    "Jawa Timur (Kediri/Blitar)": "https://www.esamsat.jatimprov.go.id",
+    "Banten": "https://dppkd.bantenprov.go.id/read/info-pkb",
+    "Aceh": "https://esamsat.acehprov.go.id",
+}
+
+SIGNAL_APP_LINKS = (
+    "📱 *Aplikasi SIGNAL (Samsat Digital Nasional)* — resmi POLRI, Kemendagri "
+    "& Jasa Raharja, berlaku buat banyak provinsi:\n"
+    "Android: https://play.google.com/store/apps/details?id=app.signal.id\n"
+    "iOS: cari \"SIGNAL Samsat Digital Nasional\" di App Store"
+)
+
+PLATE_REGEX = re.compile(r"\b([A-Z]{1,2})\s?(\d{1,4})\s?([A-Z]{0,3})\b")
+
+
+def detect_plate_and_province(ocr_text: str) -> dict:
+    """Cari pola plat nomor Indonesia di teks hasil OCR, terus tebak provinsi
+    dari kode wilayahnya. Ini cuma mapping kode publik -> provinsi, BUKAN
+    lookup data pemilik kendaraan."""
+    text = ocr_text.upper()
+    match = PLATE_REGEX.search(text)
+    if not match:
+        return {"plate_found": False}
+
+    prefix = match.group(1)
+    plate_text = " ".join(g for g in match.groups() if g)
+    # Coba kode 2 huruf dulu, baru fallback ke 1 huruf
+    province = PLATE_CODE_TO_PROVINCE.get(prefix)
+    if not province and len(prefix) == 2:
+        province = PLATE_CODE_TO_PROVINCE.get(prefix[0])
+    return {"plate_found": True, "plate_text": plate_text, "prefix": prefix, "province": province}
+
+
+def format_pajak_report(plate_info: dict) -> str:
+    lines = ["🚗 *CEK PAJAK KENDARAAN*\n"]
+
+    if not plate_info["plate_found"]:
+        lines.append(
+            "Nggak ketemu pola plat nomor yang kebaca jelas dari foto ini. "
+            "Coba foto ulang lebih dekat & jelas ke bagian platnya.\n"
+        )
+    else:
+        lines.append(f"Plat kebaca: `{plate_info['plate_text']}`")
+        if plate_info["province"]:
+            lines.append(f"Kemungkinan wilayah registrasi: *{plate_info['province']}*")
+            link = PROVINCE_ESAMSAT_LINKS.get(plate_info["province"])
+            if link:
+                lines.append(f"🔗 e-Samsat wilayah ini: {link}")
+            else:
+                search_url = f"https://www.google.com/search?q=e-samsat+resmi+{plate_info['province'].split(' ')[0]}"
+                lines.append(f"🔗 Cari e-Samsat resmi wilayah ini: {search_url}")
+        else:
+            lines.append("Kode wilayahnya nggak ada di daftar mapping bot ini.")
+        lines.append("")
+
+    lines.append(SIGNAL_APP_LINKS)
+    lines.append(
+        "\n⚠️ Deteksi wilayah dari kode plat itu perkiraan (best-effort), bisa "
+        "meleset karena pemekaran daerah/kesalahan baca OCR — selalu konfirmasi "
+        "ulang di app SIGNAL. Bot ini TIDAK mengakses data pemilik kendaraan, "
+        "cuma nunjukin channel resmi buat kamu cek kendaraan sendiri."
+    )
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
 # KYC FACE COMPARE
 # ------------------------------------------------------------------
 def compare_faces(ref_path: str, selfie_path: str, tolerance: float = FACE_MATCH_TOLERANCE) -> dict:
@@ -1110,6 +1246,16 @@ async def process_image_for_mode(update, context, local_path: str):
         result = check_duplicate(hashes["sha256"])
         await update.message.reply_text(format_duplicate_report(hashes["sha256"], result), parse_mode="Markdown")
         audit_log(user.id, user.username, "duplicate_check", f"is_dup={result['is_duplicate']}")
+
+    elif mode == "mode_pajak":
+        await update.message.reply_text("Lagi baca plat nomor dari foto...")
+        ocr_result = run_ocr(local_path)
+        ocr_text = ocr_result.get("text", "") if "error" not in ocr_result else ""
+        plate_info = detect_plate_and_province(ocr_text)
+        await update.message.reply_text(
+            format_pajak_report(plate_info), parse_mode="Markdown", disable_web_page_preview=True
+        )
+        audit_log(user.id, user.username, "pajak_check", f"plate_found={plate_info['plate_found']}")
 
     if os.path.exists(local_path):
         os.remove(local_path)
