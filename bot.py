@@ -27,7 +27,7 @@ import hashlib
 import logging
 import tempfile
 from datetime import datetime
-from collections import defaultdict, deque
+from collections import defaultdict, deque, Counter
 
 import numpy as np
 import requests
@@ -59,6 +59,16 @@ LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(KYC_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
+# Branding — ganti BOT_NAME di sini aja kalau mau rename, kepake otomatis
+# di semua header/footer pesan.
+BOT_NAME = "LensGuard"
+BOT_TAGLINE = "Asisten Investigasi & Analisis Foto"
+BRAND_HEADER = f"🛡️ *{BOT_NAME}*"
+
+# ID Telegram admin (user pemilik bot). Dapetin dari bot kayak @userinfobot.
+# Kalau di-set, command /admin & /broadcast aktif buat user ini aja.
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0") or "0")
+
 RATE_LIMIT_MAX = int(os.environ.get("RATE_LIMIT_MAX", "5"))       # max request
 RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))  # detik
 FACE_MATCH_TOLERANCE = float(os.environ.get("FACE_MATCH_TOLERANCE", "0.6"))
@@ -85,11 +95,24 @@ audit_logger.propagate = False
 def audit_log(user_id: int, username: str, action: str, detail: str = ""):
     audit_logger.info(f"user_id={user_id} username={username!r} action={action} detail={detail}")
 
+    # Tracking ringan buat /stats & /admin. Sama kayak fitur "Cek Foto Pernah
+    # Dikirim": CUMA di memory (RAM), reset tiap bot restart, bukan penyimpanan
+    # permanen ke disk/database.
+    entry = _user_registry.setdefault(
+        user_id, {"username": username, "first_seen": datetime.utcnow(), "actions": Counter()}
+    )
+    entry["username"] = username
+    entry["actions"][action] += 1
+
 
 # ------------------------------------------------------------------
 # RATE LIMITING SEDERHANA (in-memory, per user)
 # ------------------------------------------------------------------
 _request_log = defaultdict(deque)  # user_id -> deque[timestamp]
+
+# Registry user + statistik pemakaian buat /stats & /admin.
+# In-memory doang (RAM), reset tiap bot restart/redeploy — bukan database.
+_user_registry: dict = {}  # user_id -> {"username":.., "first_seen":.., "actions": Counter()}
 
 
 def is_rate_limited(user_id: int) -> bool:
@@ -104,40 +127,106 @@ def is_rate_limited(user_id: int) -> bool:
 
 
 # ------------------------------------------------------------------
-# MENU
+# MENU (kategori/submenu biar rapi, bukan 10 tombol numpuk)
 # ------------------------------------------------------------------
-MENU = [
-    [InlineKeyboardButton("🔍 Reverse Image Search", callback_data="mode_reverse")],
-    [InlineKeyboardButton("™️ Brand / Logo Monitoring", callback_data="mode_brand")],
-    [InlineKeyboardButton("🪪 Verifikasi Foto (KYC)", callback_data="mode_kyc")],
-    [InlineKeyboardButton("🕵️ Deteksi Indikasi Editan/Deepfake", callback_data="mode_deepfake")],
-    [InlineKeyboardButton("🧾 Detail Foto (EXIF/Metadata Lengkap)", callback_data="mode_metadata")],
-    [InlineKeyboardButton("🔤 OCR — Baca Teks di Foto", callback_data="mode_ocr")],
-    [InlineKeyboardButton("🕵️‍♂️ Deteksi Steganografi", callback_data="mode_stego")],
-    [InlineKeyboardButton("🎨 Analisis Warna & Kualitas Gambar", callback_data="mode_visual")],
-    [InlineKeyboardButton("🔁 Cek Foto Pernah Dikirim? (non-permanen)", callback_data="mode_duplicate")],
-    [InlineKeyboardButton("🚗 Cek Pajak Kendaraan (link resmi)", callback_data="mode_pajak")],
-]
+MODE_LABELS = {
+    "mode_reverse": "🔍 Reverse Image Search",
+    "mode_brand": "™️ Brand / Logo Monitoring",
+    "mode_kyc": "🪪 Verifikasi Foto (KYC)",
+    "mode_deepfake": "🕵️ Deteksi Editan/Deepfake",
+    "mode_stego": "🕵️‍♂️ Deteksi Steganografi",
+    "mode_metadata": "🧾 Detail Foto (EXIF/Metadata)",
+    "mode_ocr": "🔤 OCR — Baca Teks di Foto",
+    "mode_visual": "🎨 Analisis Warna & Kualitas",
+    "mode_duplicate": "🔁 Cek Foto Pernah Dikirim?",
+    "mode_pajak": "🚗 Cek Pajak Kendaraan",
+}
+
+MENU_CATEGORIES = {
+    "cat_investigasi": {
+        "title": "🔍 Investigasi Gambar",
+        "desc": "Lacak sumber & pantau brand/logo kamu di internet.",
+        "modes": ["mode_reverse", "mode_brand"],
+    },
+    "cat_verifikasi": {
+        "title": "🪪 Verifikasi & Keamanan",
+        "desc": "Cek keaslian wajah (KYC), indikasi editan/deepfake, dan steganografi.",
+        "modes": ["mode_kyc", "mode_deepfake", "mode_stego"],
+    },
+    "cat_analisis": {
+        "title": "🧾 Analisis & Metadata",
+        "desc": "Bongkar EXIF, baca teks (OCR), analisis visual, & cek duplikat.",
+        "modes": ["mode_metadata", "mode_ocr", "mode_visual", "mode_duplicate"],
+    },
+    "cat_utilitas": {
+        "title": "🚗 Utilitas",
+        "desc": "Fitur pendukung lain seputar foto kendaraan.",
+        "modes": ["mode_pajak"],
+    },
+}
+
+
+def build_main_menu_keyboard() -> InlineKeyboardMarkup:
+    buttons = [[InlineKeyboardButton(cat["title"], callback_data=key)] for key, cat in MENU_CATEGORIES.items()]
+    buttons.append([InlineKeyboardButton("❓ Bantuan", callback_data="show_help")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def build_submenu_keyboard(cat_key: str) -> InlineKeyboardMarkup:
+    cat = MENU_CATEGORIES[cat_key]
+    buttons = [[InlineKeyboardButton(MODE_LABELS[m], callback_data=m)] for m in cat["modes"]]
+    buttons.append([InlineKeyboardButton("⬅️ Menu Utama", callback_data="back_main")])
+    return InlineKeyboardMarkup(buttons)
+
+
+BACK_TO_MENU_KEYBOARD = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("🏠 Menu Utama", callback_data="back_main")]]
+)
+
+MENU = build_main_menu_keyboard()  # kompatibilitas kalau ada referensi lama
 
 WELCOME_TEXT = (
-    "Halo! Bot ini bantu beberapa hal, semuanya berbasis persetujuan (consent) — "
-    "bukan buat nyari/ngintip orang lain diam-diam:\n\n"
-    "1️⃣ Reverse Image Search — kasih link ke Google Lens / Yandex / TinEye\n"
-    "2️⃣ Brand/Logo Monitoring — sama seperti di atas, buat mantau logo/produk kamu sendiri\n"
-    "3️⃣ Verifikasi Foto (KYC) — kirim foto referensi + selfie sendiri, dibandingkan otomatis\n"
-    "4️⃣ Deteksi Indikasi Editan/Deepfake — analisa kasar (ELA), bukan detektor akurat\n"
-    "5️⃣ Detail Foto (EXIF/Metadata) — data kamera/HP, GPS (kalau ada), hash file, "
-    "indikasi editan & indikasi AI-generated\n"
-    "6️⃣ OCR — baca teks yang ada di dalam foto\n"
-    "7️⃣ Deteksi Steganografi — cek ada data/file tersembunyi yang \"ditempel\" di gambar\n"
-    "8️⃣ Analisis Warna & Kualitas — dominant color, brightness/contrast, blur score, estimasi kualitas JPEG\n"
-    "9️⃣ Cek Foto Pernah Dikirim? — cocokin hash ke foto yang pernah masuk bot ini "
-    "(data di-reset tiap bot restart, TIDAK disimpan permanen)\n"
-    "🔟 Cek Pajak Kendaraan — OCR plat nomor, terus kasih LINK RESMI (app SIGNAL "
-    "& e-Samsat provinsi) buat cek pajak kendaraan MILIK SENDIRI. Bot ini nggak "
-    "nampilin data pemilik siapapun, cuma nunjukin ke mana harus cek.\n\n"
-    "Kamu bisa kirim FOTO langsung, kirim sebagai FILE/DOKUMEN, atau LINK gambar (http/https).\n"
-    "Pilih menu di bawah dulu ya."
+    f"{BRAND_HEADER}\n"
+    f"_{BOT_TAGLINE}_\n"
+    "━━━━━━━━━━━━━━━\n\n"
+    "Halo! 👋 Semua fitur di sini berbasis *consent* — bukan buat "
+    "nyari/ngintip orang lain diam-diam.\n\n"
+    "Pilih kategori di bawah buat mulai. Butuh panduan? Ketik /help.\n\n"
+    "📎 Kirim FOTO langsung, FILE/DOKUMEN, atau LINK gambar — tergantung fitur."
+)
+
+HELP_TEXT = (
+    f"{BRAND_HEADER} — Bantuan\n"
+    "━━━━━━━━━━━━━━━\n\n"
+    "*Kategori & fitur yang tersedia:*\n\n"
+    + "\n\n".join(
+        f"*{cat['title']}*\n{cat['desc']}\n"
+        + "\n".join(f"• {MODE_LABELS[m]}" for m in cat["modes"])
+        for cat in MENU_CATEGORIES.values()
+    )
+    + "\n\n━━━━━━━━━━━━━━━\n"
+    "*Command:*\n"
+    "/menu — balik ke menu utama kapan aja\n"
+    "/help — panduan ini\n"
+    "/about — info tentang bot\n"
+    "/stats — riwayat pemakaian kamu\n\n"
+    "⚠️ Kirim lewat *Photo* biasa bikin Telegram kompres & hapus EXIF. "
+    "Buat metadata/EXIF yang utuh, kirim sebagai *File/Dokumen*."
+)
+
+ABOUT_TEXT = (
+    f"{BRAND_HEADER}\n"
+    f"_{BOT_TAGLINE}_\n"
+    "━━━━━━━━━━━━━━━\n\n"
+    f"{BOT_NAME} adalah bot analisis & investigasi foto berbasis consent: "
+    "reverse image search, deteksi editan/steganografi, baca metadata EXIF, "
+    "OCR, sampai cek pajak kendaraan lewat channel resmi.\n\n"
+    "Semua fitur dirancang buat dipakai atas foto/kepentingan kamu sendiri, "
+    "bukan buat mengintai atau mengambil data pribadi orang lain.\n\n"
+    "Beberapa fitur (statistik pemakaian, cek duplikat foto) hanya disimpan "
+    "di memory server dan otomatis kosong tiap kali bot restart — tidak ada "
+    "penyimpanan permanen ke database.\n\n"
+    "Ketik /help buat lihat semua fitur."
 )
 
 MODE_PROMPTS = {
@@ -209,19 +298,149 @@ MODE_PROMPTS = {
 
 async def start(update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text(WELCOME_TEXT, reply_markup=InlineKeyboardMarkup(MENU))
+    user = update.effective_user
+    audit_log(user.id, user.username, "start", "")
+    await update.message.reply_text(
+        WELCOME_TEXT, parse_mode="Markdown", reply_markup=build_main_menu_keyboard()
+    )
+
+
+async def menu_command(update, context: ContextTypes.DEFAULT_TYPE):
+    """Command /menu — balik ke menu utama kapan aja tanpa perlu /start ulang."""
+    context.user_data.clear()
+    await update.message.reply_text(
+        WELCOME_TEXT, parse_mode="Markdown", reply_markup=build_main_menu_keyboard()
+    )
+
+
+async def help_command(update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(HELP_TEXT, parse_mode="Markdown", reply_markup=BACK_TO_MENU_KEYBOARD)
+
+
+async def about_command(update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(ABOUT_TEXT, parse_mode="Markdown", reply_markup=BACK_TO_MENU_KEYBOARD)
+
+
+async def stats_command(update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    entry = _user_registry.get(user.id)
+    if not entry or not entry["actions"]:
+        await update.message.reply_text(
+            "📊 Belum ada riwayat pemakaian kamu tercatat (atau bot baru aja restart).",
+            reply_markup=BACK_TO_MENU_KEYBOARD,
+        )
+        return
+
+    total = sum(entry["actions"].values())
+    top_actions = entry["actions"].most_common(8)
+    lines = [
+        f"{BRAND_HEADER} — Statistik Kamu",
+        "━━━━━━━━━━━━━━━\n",
+        f"Total interaksi: *{total}*",
+        f"Tercatat sejak: {entry['first_seen'].strftime('%Y-%m-%d %H:%M UTC')} (reset tiap bot restart)\n",
+        "*Rincian aktivitas:*",
+    ]
+    lines += [f"• {action}: {count}x" for action, count in top_actions]
+    lines.append(
+        "\n⚠️ Statistik ini cuma di memory (RAM) server, bukan disimpan permanen."
+    )
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=BACK_TO_MENU_KEYBOARD)
+
+
+def _is_admin(user_id: int) -> bool:
+    return ADMIN_USER_ID != 0 and user_id == ADMIN_USER_ID
+
+
+async def admin_command(update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("Command ini cuma buat admin bot.")
+        return
+
+    if ADMIN_USER_ID == 0:
+        await update.message.reply_text("ADMIN_USER_ID belum di-set di environment variable.")
+        return
+
+    total_users = len(_user_registry)
+    total_actions = sum(sum(e["actions"].values()) for e in _user_registry.values())
+    action_totals = Counter()
+    for e in _user_registry.values():
+        action_totals.update(e["actions"])
+    top_global = action_totals.most_common(10)
+
+    lines = [
+        f"{BRAND_HEADER} — Panel Admin",
+        "━━━━━━━━━━━━━━━\n",
+        f"Total user unik (sejak restart terakhir): *{total_users}*",
+        f"Total aksi tercatat: *{total_actions}*\n",
+        "*Fitur paling sering dipakai:*",
+    ]
+    lines += [f"• {action}: {count}x" for action, count in top_global]
+    lines.append(
+        "\n⚠️ Data ini in-memory, reset tiap redeploy/restart.\n"
+        "Pakai /broadcast <pesan> buat kirim pengumuman ke semua user yang "
+        "pernah interaksi (sejak restart terakhir)."
+    )
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def broadcast_command(update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("Command ini cuma buat admin bot.")
+        return
+
+    message_text = " ".join(context.args) if context.args else ""
+    if not message_text:
+        await update.message.reply_text("Format: /broadcast <isi pesan>")
+        return
+
+    recipients = list(_user_registry.keys())
+    sent, failed = 0, 0
+    await update.message.reply_text(f"Ngirim broadcast ke {len(recipients)} user...")
+    for uid in recipients:
+        try:
+            await context.bot.send_message(
+                chat_id=uid, text=f"📢 *Pengumuman dari {BOT_NAME}*\n\n{message_text}", parse_mode="Markdown"
+            )
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"Broadcast gagal ke {uid}: {e}")
+    await update.message.reply_text(f"✅ Broadcast selesai. Terkirim: {sent}, gagal: {failed}.")
 
 
 async def menu_callback(update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    mode = query.data
+    data = query.data
+    user = query.from_user
+
+    if data == "back_main":
+        context.user_data.clear()
+        await query.edit_message_text(
+            WELCOME_TEXT, parse_mode="Markdown", reply_markup=build_main_menu_keyboard()
+        )
+        return
+
+    if data == "show_help":
+        await query.edit_message_text(HELP_TEXT, parse_mode="Markdown", reply_markup=BACK_TO_MENU_KEYBOARD)
+        return
+
+    if data in MENU_CATEGORIES:
+        cat = MENU_CATEGORIES[data]
+        text = f"{BRAND_HEADER}\n━━━━━━━━━━━━━━━\n\n*{cat['title']}*\n{cat['desc']}\n\nPilih fitur:"
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=build_submenu_keyboard(data))
+        return
+
+    # sisanya berarti pemilihan mode langsung
+    mode = data
     context.user_data.clear()
     context.user_data["mode"] = mode
     if mode == "mode_kyc":
         context.user_data["kyc_step"] = "reference"
-    text = MODE_PROMPTS.get(mode, "Mode nggak dikenal, ketik /start ulang.")
-    user = query.from_user
+    prompt = MODE_PROMPTS.get(mode, "Mode nggak dikenal, ketik /menu buat ulang.")
+    text = f"{BRAND_HEADER}\n━━━━━━━━━━━━━━━\n\n{prompt}"
     audit_log(user.id, user.username, "select_mode", mode)
     await query.edit_message_text(text, parse_mode="Markdown")
 
@@ -1157,7 +1376,7 @@ async def process_image_for_mode(update, context, local_path: str):
 
             if not ref_path or not os.path.exists(ref_path):
                 await update.message.reply_text(
-                    "Foto referensi nggak ketemu, ketik /start dan ulangi dari langkah 1."
+                    "Foto referensi nggak ketemu, ketik /menu dan ulangi dari langkah 1."
                 )
                 return
 
@@ -1184,6 +1403,9 @@ async def process_image_for_mode(update, context, local_path: str):
             # reset supaya bisa verifikasi ulang dari awal
             context.user_data["kyc_step"] = "reference"
             context.user_data.pop("kyc_ref_path", None)
+            await update.message.reply_text(
+                "✅ Verifikasi selesai. Mau cek yang lain?", reply_markup=BACK_TO_MENU_KEYBOARD
+            )
             return
 
     elif mode == "mode_deepfake":
@@ -1257,6 +1479,9 @@ async def process_image_for_mode(update, context, local_path: str):
         )
         audit_log(user.id, user.username, "pajak_check", f"plate_found={plate_info['plate_found']}")
 
+    if mode != "mode_kyc":
+        await update.message.reply_text("✅ Selesai. Mau cek yang lain?", reply_markup=BACK_TO_MENU_KEYBOARD)
+
     if os.path.exists(local_path):
         os.remove(local_path)
 
@@ -1272,7 +1497,7 @@ async def photo_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     mode = context.user_data.get("mode")
     if not mode:
-        await update.message.reply_text("Pilih dulu mode-nya ya, ketik /start buat lihat menu.")
+        await update.message.reply_text("Pilih dulu mode-nya ya, ketik /menu buat lihat menu.")
         return
 
     photo = update.message.photo[-1]
@@ -1303,7 +1528,7 @@ async def document_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     mode = context.user_data.get("mode")
     if not mode:
-        await update.message.reply_text("Pilih dulu mode-nya ya, ketik /start buat lihat menu.")
+        await update.message.reply_text("Pilih dulu mode-nya ya, ketik /menu buat lihat menu.")
         return
 
     document = update.message.document
@@ -1344,7 +1569,7 @@ async def text_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     mode = context.user_data.get("mode")
     if not mode:
-        await update.message.reply_text("Pilih dulu mode-nya ya, ketik /start buat lihat menu.")
+        await update.message.reply_text("Pilih dulu mode-nya ya, ketik /menu buat lihat menu.")
         return
 
     await update.message.reply_text("Lagi download gambar dari link...")
@@ -1374,6 +1599,12 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", menu_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("about", about_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CallbackQueryHandler(menu_callback))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.Document.IMAGE, document_handler))
